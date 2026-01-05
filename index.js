@@ -1,6 +1,7 @@
 // ===============================
 // IMPORTS & BASIC SETUP
 // ===============================
+const bcrypt = require("bcrypt");
 const express = require("express");
 const sqlite3 = require("sqlite3").verbose();
 const { v4: uuidv4 } = require("uuid");
