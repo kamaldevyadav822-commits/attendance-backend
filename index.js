@@ -9,21 +9,21 @@ app.use(cors());
 
 const db = new sqlite3.Database("./attendance.db");
 
-// ---------- DATABASE ----------
+// ---------- DATABASE SETUP ----------
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS students (
       student_id TEXT PRIMARY KEY,
-      name TEXT,
-      roll_no TEXT UNIQUE,
-      department TEXT
+      name TEXT NOT NULL,
+      roll_no TEXT UNIQUE NOT NULL,
+      department TEXT NOT NULL
     )
   `);
 
   db.run(`
     CREATE TABLE IF NOT EXISTS attendance_sessions (
       session_id TEXT PRIMARY KEY,
-      department TEXT,
+      department TEXT NOT NULL,
       start_time INTEGER,
       end_time INTEGER,
       status TEXT
@@ -43,11 +43,13 @@ db.serialize(() => {
 // ---------- REGISTER STUDENT ----------
 app.post("/api/students/register", (req, res) => {
   const { name, roll_no, department } = req.body;
+
   if (!name || !roll_no || !department) {
-    return res.status(400).json({ error: "All fields required" });
+    return res.status(400).json({ error: "All fields are required" });
   }
 
   const student_id = uuidv4();
+
   db.run(
     "INSERT INTO students VALUES (?, ?, ?, ?)",
     [student_id, name, roll_no, department],
@@ -60,20 +62,25 @@ app.post("/api/students/register", (req, res) => {
   );
 });
 
-// ---------- START SESSION (UNPROTECTED FOR NOW) ----------
+// ---------- START ATTENDANCE SESSION ----------
 app.post("/api/sessions/start", (req, res) => {
   const { department, duration_minutes } = req.body;
   const now = Date.now();
 
+  if (!department || !duration_minutes) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
   db.get(
     "SELECT * FROM attendance_sessions WHERE status='ACTIVE' AND department=?",
     [department],
-    (err, row) => {
-      if (row) {
+    (err, existing) => {
+      if (existing) {
         return res.status(400).json({ error: "Session already active" });
       }
 
       const session_id = uuidv4();
+
       db.run(
         "INSERT INTO attendance_sessions VALUES (?, ?, ?, ?, 'ACTIVE')",
         [session_id, department, now, now + duration_minutes * 60000],
@@ -88,12 +95,15 @@ app.post("/api/attendance/mark", (req, res) => {
   const { student_id } = req.body;
   const now = Date.now();
 
+  if (!student_id) {
+    return res.status(400).json({ error: "Student ID missing" });
+  }
+
   db.get(
     `
     SELECT s.session_id
     FROM attendance_sessions s
-    JOIN students st
-      ON s.department = st.department
+    JOIN students st ON s.department = st.department
     WHERE s.status='ACTIVE'
       AND s.end_time > ?
       AND st.student_id = ?
@@ -101,7 +111,7 @@ app.post("/api/attendance/mark", (req, res) => {
     [now, student_id],
     (err, session) => {
       if (!session) {
-        return res.status(400).json({ error: "Attendance closed" });
+        return res.status(400).json({ error: "Attendance closed or invalid" });
       }
 
       db.run(
@@ -118,9 +128,10 @@ app.post("/api/attendance/mark", (req, res) => {
   );
 });
 
-// ---------- AUTO END SESSION ----------
+// ---------- AUTO END & AUTO ABSENT ----------
 setInterval(() => {
   const now = Date.now();
+
   db.all(
     "SELECT * FROM attendance_sessions WHERE status='ACTIVE' AND end_time <= ?",
     [now],
@@ -146,4 +157,6 @@ setInterval(() => {
 
 // ---------- SERVER ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Backend running on port", PORT));
+app.listen(PORT, () => {
+  console.log("Backend running on port", PORT);
+});
