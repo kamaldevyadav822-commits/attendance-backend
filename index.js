@@ -1,54 +1,51 @@
-// ===============================
-// IMPORTS & BASIC SETUP
-// ===============================
-const bcrypt = require("bcrypt");
+// ================== IMPORTS ==================
 const express = require("express");
 const sqlite3 = require("sqlite3").verbose();
 const { v4: uuidv4 } = require("uuid");
 const cors = require("cors");
+const bcrypt = require("bcrypt");
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
+// ================== DATABASE ==================
 const db = new sqlite3.Database("./attendance.db");
 
-// ===============================
-// DATABASE TABLES
-// ===============================
+// ================== TABLES ==================
 db.serialize(() => {
 
-  // ---------- STUDENTS ----------
+  // STUDENTS
   db.run(`
     CREATE TABLE IF NOT EXISTS students (
       student_id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      roll_no TEXT UNIQUE NOT NULL,
-      department TEXT NOT NULL
+      name TEXT,
+      roll_no TEXT UNIQUE,
+      department TEXT
     )
   `);
 
-  // ---------- TEACHERS ----------
+  // TEACHERS
   db.run(`
     CREATE TABLE IF NOT EXISTS teachers (
       teacher_id TEXT PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      password TEXT NOT NULL
+      username TEXT UNIQUE,
+      password TEXT
     )
   `);
 
-  // ---------- ATTENDANCE SESSIONS ----------
+  // SESSIONS
   db.run(`
     CREATE TABLE IF NOT EXISTS attendance_sessions (
       session_id TEXT PRIMARY KEY,
-      department TEXT NOT NULL,
+      department TEXT,
       start_time INTEGER,
       end_time INTEGER,
       status TEXT
     )
   `);
 
-  // ---------- ATTENDANCE RECORDS ----------
+  // RECORDS
   db.run(`
     CREATE TABLE IF NOT EXISTS attendance_records (
       session_id TEXT,
@@ -59,27 +56,24 @@ db.serialize(() => {
   `);
 });
 
-// ===============================
-// CREATE DEFAULT TEACHER (ONCE)
-// ===============================
+// ================== DEFAULT TEACHER ==================
 db.get("SELECT * FROM teachers", (err, row) => {
   if (!row) {
+    const hash = bcrypt.hashSync("admin123", 10);
     db.run(
       "INSERT INTO teachers VALUES (?, ?, ?)",
-      ["t-001", "admin", "admin123"]
+      ["t-001", "admin", hash]
     );
-    console.log("Default teacher created → username: admin | password: admin123");
+    console.log("Default teacher created → admin / admin123");
   }
 });
 
-// ===============================
-// STUDENT REGISTRATION
-// ===============================
+// ================== STUDENT REGISTER ==================
 app.post("/api/students/register", (req, res) => {
   const { name, roll_no, department } = req.body;
 
   if (!name || !roll_no || !department) {
-    return res.status(400).json({ error: "All fields are required" });
+    return res.status(400).json({ error: "Missing fields" });
   }
 
   const student_id = uuidv4();
@@ -96,55 +90,42 @@ app.post("/api/students/register", (req, res) => {
   );
 });
 
-// ===============================
-// TEACHER LOGIN
-// ===============================
+// ================== TEACHER LOGIN ==================
 app.post("/api/teacher/login", (req, res) => {
   const { username, password } = req.body;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: "Missing credentials" });
-  }
-
   db.get(
-    "SELECT teacher_id FROM teachers WHERE username=? AND password=?",
-    [username, password],
-    (err, row) => {
-      if (!row) {
-        return res.status(401).json({ error: "Invalid username or password" });
+    "SELECT * FROM teachers WHERE username=?",
+    [username],
+    (err, teacher) => {
+      if (!teacher || !bcrypt.compareSync(password, teacher.password)) {
+        return res.status(401).json({ error: "Invalid credentials" });
       }
-      res.json({ teacher_id: row.teacher_id });
+      res.json({ teacher_id: teacher.teacher_id });
     }
   );
 });
 
-// ===============================
-// START ATTENDANCE SESSION (TEACHER ONLY)
-// ===============================
+// ================== START SESSION ==================
 app.post("/api/sessions/start", (req, res) => {
   const { teacher_id, department, duration_minutes } = req.body;
-
-  if (!teacher_id || !department || !duration_minutes) {
-    return res.status(403).json({ error: "Unauthorized or missing fields" });
-  }
-
   const now = Date.now();
 
-  // verify teacher
+  if (!teacher_id || !department || !duration_minutes) {
+    return res.status(400).json({ error: "Invalid request" });
+  }
+
   db.get(
     "SELECT * FROM teachers WHERE teacher_id=?",
     [teacher_id],
     (err, teacher) => {
-      if (!teacher) {
-        return res.status(403).json({ error: "Unauthorized" });
-      }
+      if (!teacher) return res.status(403).json({ error: "Unauthorized" });
 
-      // only one active session per department
       db.get(
         "SELECT * FROM attendance_sessions WHERE status='ACTIVE' AND department=?",
         [department],
-        (err, existing) => {
-          if (existing) {
+        (err, active) => {
+          if (active) {
             return res.status(400).json({ error: "Session already active" });
           }
 
@@ -160,16 +141,10 @@ app.post("/api/sessions/start", (req, res) => {
   );
 });
 
-// ===============================
-// MARK ATTENDANCE (STUDENT)
-// ===============================
+// ================== MARK ATTENDANCE ==================
 app.post("/api/attendance/mark", (req, res) => {
   const { student_id } = req.body;
   const now = Date.now();
-
-  if (!student_id) {
-    return res.status(400).json({ error: "Student ID missing" });
-  }
 
   db.get(
     `
@@ -200,9 +175,7 @@ app.post("/api/attendance/mark", (req, res) => {
   );
 });
 
-// ===============================
-// AUTO END SESSION & MARK ABSENT
-// ===============================
+// ================== AUTO CLOSE & ABSENT ==================
 setInterval(() => {
   const now = Date.now();
 
@@ -211,8 +184,6 @@ setInterval(() => {
     [now],
     (err, sessions) => {
       sessions.forEach(s => {
-
-        // mark absentees
         db.run(
           `
           INSERT OR IGNORE INTO attendance_records
@@ -222,7 +193,6 @@ setInterval(() => {
           [s.session_id, s.department]
         );
 
-        // close session
         db.run(
           "UPDATE attendance_sessions SET status='INACTIVE' WHERE session_id=?",
           [s.session_id]
@@ -232,26 +202,18 @@ setInterval(() => {
   );
 }, 60000);
 
-// ===============================
-// ATTENDANCE HISTORY (DATE-WISE, TEACHER)
-// ===============================
+// ================== VIEW ATTENDANCE ==================
 app.get("/api/admin/history", (req, res) => {
   const { teacher_id, department, date } = req.query;
 
-  if (!teacher_id || !department || !date) {
-    return res.status(403).json({ error: "Unauthorized" });
-  }
-
-  const dayStart = new Date(date).setHours(0, 0, 0, 0);
-  const dayEnd = new Date(date).setHours(23, 59, 59, 999);
+  const start = new Date(date).setHours(0,0,0,0);
+  const end = new Date(date).setHours(23,59,59,999);
 
   db.get(
     "SELECT * FROM teachers WHERE teacher_id=?",
     [teacher_id],
     (err, teacher) => {
-      if (!teacher) {
-        return res.status(403).json({ error: "Unauthorized" });
-      }
+      if (!teacher) return res.status(403).json({ error: "Unauthorized" });
 
       db.all(
         `
@@ -259,45 +221,83 @@ app.get("/api/admin/history", (req, res) => {
         FROM attendance_records ar
         JOIN attendance_sessions s ON ar.session_id = s.session_id
         JOIN students st ON ar.student_id = st.student_id
-        WHERE s.department = ?
-          AND s.start_time BETWEEN ? AND ?
+        WHERE s.department=? AND s.start_time BETWEEN ? AND ?
         `,
-        [department, dayStart, dayEnd],
+        [department, start, end],
         (err, rows) => res.json(rows)
       );
     }
   );
 });
 
-// ===============================
-// QR GENERATION (TEACHER PANEL)
-// ===============================
-app.get("/api/admin/qr", (req, res) => {
-  const { teacher_id } = req.query;
+// ================== EXPORT CSV ==================
+app.get("/api/admin/export", (req, res) => {
+  const { teacher_id, department, date } = req.query;
 
-  if (!teacher_id) {
-    return res.status(403).json({ error: "Unauthorized" });
-  }
+  const start = new Date(date).setHours(0,0,0,0);
+  const end = new Date(date).setHours(23,59,59,999);
+
+  db.all(
+    `
+    SELECT st.name, st.roll_no, ar.status
+    FROM attendance_records ar
+    JOIN attendance_sessions s ON ar.session_id = s.session_id
+    JOIN students st ON ar.student_id = st.student_id
+    WHERE s.department=? AND s.start_time BETWEEN ? AND ?
+    `,
+    [department, start, end],
+    (err, rows) => {
+      let csv = "Name,Roll No,Status\n";
+      rows.forEach(r => {
+        csv += `${r.name},${r.roll_no},${r.status}\n`;
+      });
+
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment; filename=attendance.csv");
+      res.send(csv);
+    }
+  );
+});
+
+// ================== ADMIN: LIST STUDENTS ==================
+app.get("/api/admin/students", (req, res) => {
+  const { teacher_id } = req.query;
 
   db.get(
     "SELECT * FROM teachers WHERE teacher_id=?",
     [teacher_id],
     (err, teacher) => {
-      if (!teacher) {
-        return res.status(403).json({ error: "Unauthorized" });
-      }
+      if (!teacher) return res.status(403).json({ error: "Unauthorized" });
 
-      // 🔴 CHANGE THIS TO YOUR STUDENT APP URL
-      res.json({
-        qr_url: "https://attendance-frontendd.onrender.com/"
-      });
+      db.all(
+        "SELECT student_id, name, roll_no, department FROM students ORDER BY department, name",
+        (err, rows) => res.json(rows)
+      );
     }
   );
 });
 
-// ===============================
-// SERVER START
-// ===============================
+// ================== ADMIN: DELETE STUDENT ==================
+app.delete("/api/admin/students/:id", (req, res) => {
+  const { teacher_id } = req.query;
+  const studentId = req.params.id;
+
+  db.get(
+    "SELECT * FROM teachers WHERE teacher_id=?",
+    [teacher_id],
+    (err, teacher) => {
+      if (!teacher) return res.status(403).json({ error: "Unauthorized" });
+
+      db.run(
+        "DELETE FROM students WHERE student_id=?",
+        [studentId],
+        () => res.json({ message: "Student removed" })
+      );
+    }
+  );
+});
+
+// ================== SERVER ==================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Backend running on port", PORT);
